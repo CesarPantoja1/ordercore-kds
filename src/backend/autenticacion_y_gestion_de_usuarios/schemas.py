@@ -1,10 +1,10 @@
-from __future__ import annotations
-
 import enum
-from typing import Optional
+from typing import List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
+
+# --- Enumerations ---
 
 class Rol(str, enum.Enum):
     JEFE_COCINA = "jefe_cocina"
@@ -25,9 +25,10 @@ class Estacion(str, enum.Enum):
 class SetupCompleteRequest(BaseModel):
     nombre: str = Field(..., min_length=2, max_length=100)
     email: str = Field(
-        ..., pattern=r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+        ...,
+        pattern=r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$',
     )
-    password: str = Field(..., min_length=8)
+    password: str = Field(..., min_length=8, max_length=72)
 
 
 class LoginRequest(BaseModel):
@@ -85,7 +86,7 @@ class LoginResponse(BaseModel):
 
 
 class PaginatedUsers(BaseModel):
-    items: list[UserOut]
+    items: List[UserOut]
     total: int
     page: int
     page_size: int

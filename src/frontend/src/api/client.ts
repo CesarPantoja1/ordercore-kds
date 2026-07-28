@@ -1,81 +1,57 @@
 const API_URL = `${import.meta.env.VITE_BACKEND_URL?.replace(/\/$/, '') || ''}/api`;
 
 export class ApiError extends Error {
-  public statusCode: number;
-  public code: string | null;
-  public detail: string;
+  status: number;
+  code?: string;
+  detail: unknown;
 
-  constructor(statusCode: number, detail: string, code: string | null = null) {
-    super(detail);
+  constructor(status: number, detail: unknown, code?: string) {
+    const message = typeof detail === 'string' ? detail : code || `HTTP ${status}`;
+    super(message);
     this.name = 'ApiError';
-    this.statusCode = statusCode;
-    this.code = code;
+    this.status = status;
     this.detail = detail;
+    this.code = code;
   }
-}
 
-export function getToken(): string | null {
-  return localStorage.getItem('auth_token');
-}
-
-export function setToken(token: string): void {
-  localStorage.setItem('auth_token', token);
-}
-
-export function removeToken(): void {
-  localStorage.removeItem('auth_token');
-}
-
-export function setUser(user: unknown): void {
-  localStorage.setItem('auth_user', JSON.stringify(user));
-}
-
-export function removeUser(): void {
-  localStorage.removeItem('auth_user');
-}
-
-export function getUser<T = unknown>(): T | null {
-  try {
-    const raw = localStorage.getItem('auth_user');
-    return raw ? (JSON.parse(raw) as T) : null;
-  } catch {
-    return null;
-  }
-}
-
-async function parseErrorResponse(res: Response): Promise<ApiError> {
-  try {
-    const body = await res.json();
-    // FastAPI structured error: {"detail": {"detalle": "...", "codigo": "..."}}
-    if (body?.detail && typeof body.detail === 'object') {
-      return new ApiError(
-        res.status,
-        body.detail.detalle || JSON.stringify(body.detail),
-        body.detail.codigo || null
-      );
+  get humanMessage(): string {
+    if (this.detail && typeof this.detail === 'object' && this.detail !== null) {
+      const d = this.detail as Record<string, unknown>;
+      if (d.detalle && typeof d.detalle === 'string') return d.detalle;
     }
-    // FastAPI simple error: {"detail": "..."}
-    if (body?.detail && typeof body.detail === 'string') {
-      return new ApiError(res.status, body.detail, null);
+    if (this.detail && typeof this.detail === 'object' && this.detail !== null) {
+      const d = this.detail as Record<string, unknown>;
+      if (d.detail && typeof d.detail === 'object' && d.detail !== null) {
+        const inner = d.detail as Record<string, unknown>;
+        if (inner.detalle && typeof inner.detalle === 'string') return inner.detalle;
+        if (inner.msg && typeof inner.msg === 'string') return inner.msg;
+      }
+      if (d.detail && typeof d.detail === 'string') return d.detail;
     }
-    return new ApiError(res.status, body?.message || `Error ${res.status}`, null);
-  } catch {
-    return new ApiError(res.status, `Error ${res.status}: ${res.statusText}`, null);
+    return this.message;
   }
+}
+
+function getAuthHeaders(): Record<string, string> {
+  const token = localStorage.getItem('token');
+  if (token) {
+    return { Authorization: `Bearer ${token}` };
+  }
+  return {};
 }
 
 export async function request<T>(
   path: string,
-  options: {
+  options?: {
     method?: string;
     body?: unknown;
     params?: Record<string, string | number | undefined>;
-    auth?: boolean;
-  } = {}
+  }
 ): Promise<T> {
-  const { method = 'GET', body, params, auth = false } = options;
+  const { method = 'GET', body, params } = options || {};
 
   let url = `${API_URL}${path}`;
+
   if (params) {
     const searchParams = new URLSearchParams();
     Object.entries(params).forEach(([key, value]) => {
@@ -89,14 +65,8 @@ export async function request<T>(
 
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
+    ...getAuthHeaders(),
   };
-
-  if (auth) {
-    const token = getToken();
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
-    }
-  }
 
   const res = await fetch(url, {
     method,
@@ -105,13 +75,27 @@ export async function request<T>(
   });
 
   if (!res.ok) {
-    throw await parseErrorResponse(res);
+    let detail: unknown = undefined;
+    let code: string | undefined = undefined;
+    try {
+      const json = await res.json();
+      detail = json;
+      if (json.codigo) code = json.codigo;
+      if (json.detail) {
+        if (typeof json.detail === 'object' && json.detail !== null) {
+          detail = json.detail;
+          const d = json.detail as Record<string, unknown>;
+          if (d.codigo) code = String(d.codigo);
+        } else {
+          detail = json.detail;
+        }
+      }
+    } catch {
+      detail = res.statusText;
+    }
+    throw new ApiError(res.status, detail, code);
   }
 
-  // Handle 204 No Content
-  if (res.status === 204) {
-    return undefined as unknown as T;
-  }
-
+  if (res.status === 204) return undefined as unknown as T;
   return res.json() as Promise<T>;
 }

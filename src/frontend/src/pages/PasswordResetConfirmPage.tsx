@@ -1,103 +1,96 @@
-import { useState, useEffect } from 'react';
-import { useNavigate, useParams, Link } from 'react-router-dom';
+import React, { useState, useEffect } from 'react';
+import { useNavigate, useSearchParams } from 'react-router-dom';
+import { ChefHat, Loader2, AlertCircle, CheckCircle2, Eye, EyeOff } from 'lucide-react';
 import { verifyResetToken, resetPassword } from '../api/auth';
-import { Loader2, AlertCircle, CheckCircle, Eye, EyeOff, KeyRound } from 'lucide-react';
-import type { ApiError } from '../api/client';
+import { ApiError } from '../api/client';
 
 export default function PasswordResetConfirmPage() {
-  const { token } = useParams<{ token: string }>();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const tokenFromUrl = searchParams.get('token') || '';
 
-  const [validToken, setValidToken] = useState<boolean | null>(null);
-  const [checking, setChecking] = useState(true);
+  const [token] = useState(tokenFromUrl);
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
-  const [showPassword, setShowPassword] = useState(false);
-  const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
+  const [loading, setLoading] = useState(false);
+  const [verifying, setVerifying] = useState(true);
+  const [tokenValid, setTokenValid] = useState(false);
   const [success, setSuccess] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
 
   useEffect(() => {
     if (!token) {
-      setValidToken(false);
-      setChecking(false);
+      setError('Token de recuperación no proporcionado');
+      setVerifying(false);
       return;
     }
-    verifyResetToken(token)
-      .then((res) => {
-        setValidToken(res.valid);
-        setChecking(false);
-      })
-      .catch(() => {
-        setValidToken(false);
-        setChecking(false);
-      });
+
+    const checkToken = async () => {
+      try {
+        const status = await verifyResetToken(token);
+        if (status.valid) {
+          setTokenValid(true);
+        } else {
+          setError('El enlace de recuperación es inválido o ha expirado');
+        }
+      } catch (err) {
+        if (err instanceof ApiError) {
+          setError(err.humanMessage || 'El enlace de recuperación es inválido o ha expirado');
+        } else {
+          setError('Error al verificar el token');
+        }
+      } finally {
+        setVerifying(false);
+      }
+    };
+
+    checkToken();
   }, [token]);
+
+  const validate = (): boolean => {
+    const errors: Record<string, string> = {};
+    if (!password) {
+      errors.password = 'La contraseña es requerida';
+    } else if (password.length < 8) {
+      errors.password = 'La contraseña debe tener al menos 8 caracteres';
+    }
+    if (password !== confirmPassword) {
+      errors.confirmPassword = 'Las contraseñas no coinciden';
+    }
+    setFieldErrors(errors);
+    return Object.keys(errors).length === 0;
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
 
-    if (!password || password.length < 8) {
-      setError('La contraseña debe tener al menos 8 caracteres.');
-      return;
-    }
-    if (password !== confirmPassword) {
-      setError('Las contraseñas no coinciden.');
-      return;
-    }
+    if (!validate()) return;
 
     setLoading(true);
     try {
-      await resetPassword({ token: token!, password });
+      await resetPassword({ token, password });
       setSuccess(true);
-      setTimeout(() => {
-        navigate('/login', { replace: true });
-      }, 2000);
+      setTimeout(() => navigate('/login'), 2000);
     } catch (err) {
-      const apiErr = err as ApiError;
-      if (apiErr.code === 'INVALID_OR_EXPIRED_TOKEN') {
-        setError('El token es inválido o ha expirado.');
-      } else if (apiErr.code === 'WEAK_PASSWORD') {
-        setError('La contraseña no cumple con los requisitos de seguridad.');
+      if (err instanceof ApiError) {
+        setError(err.humanMessage || 'Error al restablecer la contraseña');
       } else {
-        setError(apiErr.detail || 'Error al restablecer la contraseña.');
+        setError('Error de conexión. Verifica el servidor.');
       }
     } finally {
       setLoading(false);
     }
   };
 
-  if (checking) {
+  if (verifying) {
     return (
       <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
-        <div className="flex flex-col items-center gap-3">
-          <Loader2 className="w-8 h-8 text-blue-600 animate-spin" />
-          <p className="text-sm text-slate-500">Validando token...</p>
-        </div>
-      </div>
-    );
-  }
-
-  if (!validToken) {
-    return (
-      <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
-        <div className="bg-white rounded-2xl shadow-sm p-8 max-w-md w-full text-center">
-          <div className="text-red-400 mb-4 flex justify-center">
-            <AlertCircle className="w-16 h-16" />
-          </div>
-          <h2 className="text-xl font-bold text-slate-900 mb-2">
-            Token inválido o expirado
-          </h2>
-          <p className="text-sm text-slate-500 mb-6">
-            El enlace para restablecer tu contraseña ya no es válido. Solicita uno nuevo.
-          </p>
-          <Link
-            to="/recuperar-contrasena"
-            className="inline-block px-6 py-2 bg-blue-600 text-white rounded-xl hover:bg-blue-700 transition-all text-sm"
-          >
-            Solicitar nuevo enlace
-          </Link>
+        <div className="text-center">
+          <Loader2 className="w-10 h-10 text-blue-600 animate-spin mx-auto mb-4" />
+          <p className="text-sm text-slate-500">Verificando enlace de recuperación...</p>
         </div>
       </div>
     );
@@ -107,11 +100,11 @@ export default function PasswordResetConfirmPage() {
     return (
       <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
         <div className="bg-white rounded-2xl shadow-sm p-8 max-w-md w-full text-center">
-          <div className="text-green-500 mb-4 flex justify-center">
-            <CheckCircle className="w-16 h-16" />
+          <div className="mx-auto w-16 h-16 bg-green-100 rounded-full flex items-center justify-center mb-4">
+            <CheckCircle2 className="w-8 h-8 text-green-600" />
           </div>
-          <h2 className="text-xl font-bold text-slate-900 mb-2">
-            Contraseña actualizada
+          <h2 className="text-xl font-bold text-slate-800 mb-2">
+            ¡Contraseña actualizada!
           </h2>
           <p className="text-sm text-slate-500">
             Redirigiendo al inicio de sesión...
@@ -121,25 +114,46 @@ export default function PasswordResetConfirmPage() {
     );
   }
 
+  if (!tokenValid && !verifying) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
+        <div className="bg-white rounded-2xl shadow-sm p-8 max-w-md w-full text-center">
+          <div className="mx-auto w-16 h-16 bg-red-100 rounded-full flex items-center justify-center mb-4">
+            <AlertCircle className="w-8 h-8 text-red-600" />
+          </div>
+          <h2 className="text-xl font-bold text-slate-800 mb-2">
+            Enlace inválido
+          </h2>
+          <p className="text-sm text-slate-500 mb-6">{error}</p>
+          <button
+            type="button"
+            onClick={() => navigate('/recuperar-contrasena')}
+            className="px-6 py-2.5 bg-blue-600 text-white rounded-2xl shadow-sm hover:bg-blue-700 transition-all font-medium"
+          >
+            Solicitar nuevo enlace
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
       <div className="bg-white rounded-2xl shadow-sm p-8 max-w-md w-full">
         <div className="text-center mb-8">
-          <div className="w-12 h-12 bg-blue-600 rounded-2xl flex items-center justify-center mx-auto mb-4">
-            <span className="text-white font-bold text-lg">OC</span>
+          <div className="mx-auto w-14 h-14 bg-blue-600 rounded-2xl flex items-center justify-center mb-4">
+            <ChefHat className="w-7 h-7 text-white" />
           </div>
-          <h1 className="text-2xl font-bold text-slate-900">
+          <h1 className="text-2xl font-bold text-slate-900">OrderCore KDS</h1>
+          <p className="text-sm text-slate-500 mt-1">
             Nueva contraseña
-          </h1>
-          <p className="text-sm text-slate-500 mt-2">
-            Ingresa tu nueva contraseña
           </p>
         </div>
 
         {error && (
-          <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-xl flex items-start gap-3">
-            <AlertCircle className="w-5 h-5 text-red-500 mt-0.5 shrink-0" />
-            <p className="text-sm text-red-700">{error}</p>
+          <div className="mb-6 p-3 bg-red-50 border border-red-200 rounded-xl flex items-start gap-2 text-sm text-red-700">
+            <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
+            <span>{error}</span>
           </div>
         )}
 
@@ -154,11 +168,11 @@ export default function PasswordResetConfirmPage() {
                 type={showPassword ? 'text' : 'password'}
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                className="w-full px-4 py-3 pr-12 rounded-xl border border-slate-300 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none text-slate-900 bg-white transition-all"
+                className={`w-full px-4 py-3 pr-12 rounded-2xl border ${
+                  fieldErrors.password ? 'border-red-300 bg-red-50' : 'border-slate-200'
+                } text-slate-900 text-base placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all`}
                 placeholder="Mínimo 8 caracteres"
                 disabled={loading}
-                autoComplete="off"
-                required
               />
               <button
                 type="button"
@@ -169,6 +183,9 @@ export default function PasswordResetConfirmPage() {
                 {showPassword ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
               </button>
             </div>
+            {fieldErrors.password && (
+              <p className="mt-1 text-xs text-red-600">{fieldErrors.password}</p>
+            )}
           </div>
 
           <div>
@@ -180,25 +197,30 @@ export default function PasswordResetConfirmPage() {
               type="password"
               value={confirmPassword}
               onChange={(e) => setConfirmPassword(e.target.value)}
-              className="w-full px-4 py-3 rounded-xl border border-slate-300 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none text-slate-900 bg-white transition-all"
+              className={`w-full px-4 py-3 rounded-2xl border ${
+                fieldErrors.confirmPassword ? 'border-red-300 bg-red-50' : 'border-slate-200'
+              } text-slate-900 text-base placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all`}
               placeholder="Repite la contraseña"
               disabled={loading}
-              autoComplete="off"
-              required
             />
+            {fieldErrors.confirmPassword && (
+              <p className="mt-1 text-xs text-red-600">{fieldErrors.confirmPassword}</p>
+            )}
           </div>
 
           <button
             type="submit"
             disabled={loading}
-            className="w-full py-3 bg-blue-600 text-white font-medium rounded-xl hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all flex items-center justify-center gap-2"
+            className="w-full py-3 bg-blue-600 text-white font-medium rounded-2xl shadow-sm hover:bg-blue-700 disabled:opacity-60 disabled:cursor-not-allowed transition-all flex items-center justify-center gap-2"
           >
             {loading ? (
-              <Loader2 className="w-5 h-5 animate-spin" />
+              <>
+                <Loader2 className="w-5 h-5 animate-spin" />
+                Actualizando...
+              </>
             ) : (
-              <KeyRound className="w-5 h-5" />
+              'Restablecer contraseña'
             )}
-            {loading ? 'Actualizando...' : 'Restablecer contraseña'}
           </button>
         </form>
       </div>

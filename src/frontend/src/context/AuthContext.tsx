@@ -1,121 +1,98 @@
 import { createContext, useContext, useState, useEffect, useCallback, type ReactNode } from 'react';
-import { Navigate } from 'react-router-dom';
-import { setupStatus, getCurrentUser } from '../api/auth';
-import { setToken, removeToken, setUser, removeUser, getToken, getUser } from '../api/client';
+import { getCurrentUser, login as apiLogin, logout as apiLogout, setupStatus } from '../api/auth';
 import type { UserOut } from '../api/auth';
 
 interface AuthContextType {
   user: UserOut | null;
+  token: string | null;
   isAuthenticated: boolean;
-  isLoading: boolean;
-  setupRequired: boolean;
-  setupLoading: boolean;
-  loginSuccess: (token: string, user: UserOut) => void;
-  logoutAction: () => void;
-  refreshUser: () => Promise<void>;
-  refreshSetupStatus: () => Promise<void>;
+  isAuthLoading: boolean;
+  setupCompleted: boolean | null;
+  login: (email: string, password: string) => Promise<void>;
+  logout: () => Promise<void>;
+  checkAuth: () => Promise<void>;
 }
 
-const AuthContext = createContext<AuthContextType | null>(null);
+const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [user, setUserState] = useState<UserOut | null>(() => getUser<UserOut>());
-  const [isLoading, setIsLoading] = useState(true);
-  const [setupRequired, setSetupRequired] = useState(false);
-  const [setupLoading, setSetupLoading] = useState(true);
+  const [user, setUser] = useState<UserOut | null>(null);
+  const [token, setToken] = useState<string | null>(localStorage.getItem('token'));
+  const [isAuthLoading, setIsAuthLoading] = useState(true);
+  const [setupCompleted, setSetupCompleted] = useState<boolean | null>(null);
 
-  const refreshUser = useCallback(async () => {
+  const checkAuth = useCallback(async () => {
+    const storedToken = localStorage.getItem('token');
+    if (!storedToken) {
+      setUser(null);
+      setToken(null);
+      setIsAuthLoading(false);
+      return;
+    }
+
     try {
       const currentUser = await getCurrentUser();
-      setUserState(currentUser);
       setUser(currentUser);
+      setToken(storedToken);
     } catch {
-      removeToken();
-      removeUser();
-      setUserState(null);
+      localStorage.removeItem('token');
+      localStorage.removeItem('user');
+      setUser(null);
+      setToken(null);
+    } finally {
+      setIsAuthLoading(false);
     }
   }, []);
 
-  const refreshSetupStatus = useCallback(async () => {
+  const checkSetup = useCallback(async () => {
     try {
       const status = await setupStatus();
-      setSetupRequired(!status.setup_completed);
-      setSetupLoading(false);
+      setSetupCompleted(status.setup_completed);
     } catch {
-      setSetupRequired(true);
-      setSetupLoading(false);
+      setSetupCompleted(true);
     }
   }, []);
 
-  // On mount: check setup status first
   useEffect(() => {
-    let cancelled = false;
-    async function init() {
-      // Check setup status
-      try {
-        const status = await setupStatus();
-        if (!cancelled) {
-          setSetupRequired(!status.setup_completed);
-          setSetupLoading(false);
-        }
-      } catch {
-        if (!cancelled) {
-          setSetupRequired(true);
-          setSetupLoading(false);
-        }
-      }
-
-      // Check existing auth
-      const token = getToken();
-      if (token) {
-        try {
-          const currentUser = await getCurrentUser();
-          if (!cancelled) {
-            setUserState(currentUser);
-            setUser(currentUser);
-          }
-        } catch {
-          if (!cancelled) {
-            removeToken();
-            removeUser();
-            setUserState(null);
-          }
-        }
-      }
-      if (!cancelled) {
-        setIsLoading(false);
-      }
-    }
+    const init = async () => {
+      setIsAuthLoading(true);
+      await checkSetup();
+      await checkAuth();
+    };
     init();
-    return () => { cancelled = true; };
+  }, [checkAuth, checkSetup]);
+
+  const login = useCallback(async (email: string, password: string) => {
+    const res = await apiLogin({ email, password });
+    localStorage.setItem('token', res.token);
+    localStorage.setItem('user', JSON.stringify(res.user));
+    setToken(res.token);
+    setUser(res.user);
   }, []);
 
-  const loginSuccess = useCallback((token: string, userData: UserOut) => {
-    setToken(token);
-    setUser(userData);
-    setUserState(userData);
+  const logout = useCallback(async () => {
+    try {
+      await apiLogout();
+    } catch {
+      // ignore logout errors
+    }
+    localStorage.removeItem('token');
+    localStorage.removeItem('user');
+    setToken(null);
+    setUser(null);
   }, []);
-
-  const logoutAction = useCallback(() => {
-    removeToken();
-    removeUser();
-    setUserState(null);
-  }, []);
-
-  const isAuthenticated = !!user && user.activo;
 
   return (
     <AuthContext.Provider
       value={{
         user,
-        isAuthenticated,
-        isLoading,
-        setupRequired,
-        setupLoading,
-        loginSuccess,
-        logoutAction,
-        refreshUser,
-        refreshSetupStatus,
+        token,
+        isAuthenticated: !!user && !!token,
+        isAuthLoading,
+        setupCompleted,
+        login,
+        logout,
+        checkAuth,
       }}
     >
       {children}
@@ -124,56 +101,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 }
 
 export function useAuth(): AuthContextType {
-  const ctx = useContext(AuthContext);
-  if (!ctx) throw new Error('useAuth must be used within AuthProvider');
-  return ctx;
-}
-
-// Guard components
-export function ProtectedRoute({ children, allowedRoles }: { children: ReactNode; allowedRoles?: string[] }) {
-  const { isAuthenticated, isLoading, setupRequired, setupLoading, user } = useAuth();
-
-  if (setupLoading || isLoading) {
-    return (
-      <div className="flex items-center justify-center min-h-screen bg-slate-50">
-        <div className="animate-spin w-8 h-8 border-4 border-blue-600 border-t-transparent rounded-full" />
-      </div>
-    );
+  const context = useContext(AuthContext);
+  if (!context) {
+    throw new Error('useAuth must be used within an AuthProvider');
   }
-
-  if (setupRequired) {
-    return <Navigate to="/setup-wizard" replace />;
-  }
-
-  if (!isAuthenticated) {
-    return <Navigate to="/login" replace />;
-  }
-
-  if (allowedRoles && user && !allowedRoles.includes(user.rol)) {
-    return <Navigate to="/dashboard" replace />;
-  }
-
-  return <>{children}</>;
-}
-
-export function PublicRoute({ children }: { children: ReactNode }) {
-  const { isAuthenticated, isLoading, setupRequired, setupLoading } = useAuth();
-
-  if (setupLoading || isLoading) {
-    return (
-      <div className="flex items-center justify-center min-h-screen bg-slate-50">
-        <div className="animate-spin w-8 h-8 border-4 border-blue-600 border-t-transparent rounded-full" />
-      </div>
-    );
-  }
-
-  if (setupRequired) {
-    return <Navigate to="/setup-wizard" replace />;
-  }
-
-  if (isAuthenticated) {
-    return <Navigate to="/dashboard" replace />;
-  }
-
-  return <>{children}</>;
+  return context;
 }

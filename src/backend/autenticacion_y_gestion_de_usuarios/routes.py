@@ -1,32 +1,25 @@
-from __future__ import annotations
-
-import secrets
 from datetime import datetime, timedelta
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import select, func
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from database import get_db
-from autenticacion_y_gestion_de_usuarios.auth_service import (
-    RESET_TOKEN_EXPIRE_MINUTES,
+
+from .auth_service import (
+    DEFAULT_SESSION_TIMEOUT_MINUTES,
     create_access_token,
-    decode_access_token,
+    decode_token,
     generate_reset_token,
-    get_session_timeout,
+    get_session_timeout_from_config,
     hash_password,
     verify_password,
 )
-from autenticacion_y_gestion_de_usuarios.dependencies import get_current_user, require_role
-from autenticacion_y_gestion_de_usuarios.models import (
-    ConfiguracionSistema,
-    ResetToken,
-    Sesion,
-    Usuario,
-)
-from autenticacion_y_gestion_de_usuarios.schemas import (
+from .dependencies import get_admin_user, get_current_user
+from .models import ConfiguracionSistema, ResetToken, Sesion, Usuario
+from .schemas import (
     Estacion,
     LoginRequest,
     LoginResponse,
@@ -51,46 +44,65 @@ from autenticacion_y_gestion_de_usuarios.schemas import (
 router = APIRouter()
 
 
-# --- Setup & Status ---
+# ──────────────────────────────────────────────
+# Setup endpoints
+# ──────────────────────────────────────────────
 
-@router.get("/auth/setup/status", tags=["Auth"])
-async def get_setup_status(db: AsyncSession = Depends(get_db)):
+
+@router.get("/auth/setup/status", tags=["Setup"])
+async def check_setup_status(db: AsyncSession = Depends(get_db)):
     result = await db.execute(
-        select(ConfiguracionSistema).where(ConfiguracionSistema.clave == "setup_completed")
+        select(ConfiguracionSistema).where(
+            ConfiguracionSistema.clave == "setup_completed"
+        )
     )
-    config = result.scalars().first()
-    completed = config is not None and config.valor.lower() == "true"
+    config = result.scalar_one_or_none()
+    completed = config is not None and config.valor == "true"
     return SetupStatusResponse(setup_completed=completed)
 
 
-@router.post("/auth/setup/complete", tags=["Auth"])
+@router.post("/auth/setup/complete", tags=["Setup"])
 async def complete_setup(
     body: SetupCompleteRequest,
     db: AsyncSession = Depends(get_db),
 ):
     # Check if setup already completed
     result = await db.execute(
-        select(ConfiguracionSistema).where(ConfiguracionSistema.clave == "setup_completed")
+        select(ConfiguracionSistema).where(
+            ConfiguracionSistema.clave == "setup_completed"
+        )
     )
-    existing = result.scalars().first()
-    if existing is not None and existing.valor.lower() == "true":
+    existing = result.scalar_one_or_none()
+    if existing is not None and existing.valor == "true":
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="SETUP_ALREADY_COMPLETED",
+            detail="SETUP_ALREADY_COMPLETED: El asistente de configuración ya fue completado",
         )
 
-    # Check email uniqueness
-    user_result = await db.execute(
+    # Check if any admin user already exists
+    result = await db.execute(
+        select(Usuario).where(
+            Usuario.rol.in_(["jefe_cocina", "gerente"]), Usuario.activo.is_(True)
+        )
+    )
+    if result.scalar_one_or_none():
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="SETUP_ALREADY_COMPLETED: Ya existe un administrador en el sistema",
+        )
+
+    # Validate email uniqueness
+    result = await db.execute(
         select(Usuario).where(Usuario.email == body.email)
     )
-    if user_result.scalars().first() is not None:
+    if result.scalar_one_or_none():
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="VALIDATION_ERROR",
+            detail="EMAIL_EXISTS: El correo electrónico ya está registrado",
         )
 
-    # Create admin user
-    user = Usuario(
+    # Create admin user with role "jefe_cocina"
+    new_user = Usuario(
         nombre=body.nombre,
         email=body.email,
         password_hash=hash_password(body.password),
@@ -100,7 +112,7 @@ async def complete_setup(
         fecha_creacion=datetime.utcnow(),
         fecha_actualizacion=datetime.utcnow(),
     )
-    db.add(user)
+    db.add(new_user)
     await db.flush()
 
     # Mark setup as completed
@@ -109,81 +121,88 @@ async def complete_setup(
         valor="true",
     )
     db.add(setup_config)
+
     await db.commit()
-    await db.refresh(user)
+    await db.refresh(new_user)
 
     return SetupCompleteResponse(
         message="Configuración inicial completada exitosamente",
-        user=UserOut.model_validate(user),
+        user=UserOut.model_validate(new_user),
     )
 
 
-# --- Login ---
+# ──────────────────────────────────────────────
+# Auth endpoints
+# ──────────────────────────────────────────────
+
 
 @router.post("/auth/login", tags=["Auth"])
-async def login(
-    body: LoginRequest,
-    db: AsyncSession = Depends(get_db),
-):
+async def login(body: LoginRequest, db: AsyncSession = Depends(get_db)):
     # Find user by email
     result = await db.execute(
         select(Usuario).where(Usuario.email == body.email)
     )
-    user = result.scalars().first()
+    user = result.scalar_one_or_none()
 
     if user is None or not verify_password(body.password, user.password_hash):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="INVALID_CREDENTIALS",
+            detail="INVALID_CREDENTIALS: Credenciales inválidas",
         )
 
     if not user.activo:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="INVALID_CREDENTIALS",
+            detail="INVALID_CREDENTIALS: Credenciales inválidas",
         )
 
     # Check for existing active session
-    active_session_result = await db.execute(
+    result = await db.execute(
         select(Sesion).where(
             Sesion.usuario_id == user.id,
-            Sesion.activa == True,
+            Sesion.activa.is_(True),
         )
     )
-    active_session = active_session_result.scalars().first()
-    if active_session is not None:
+    existing_session = result.scalar_one_or_none()
+    if existing_session is not None:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="SESSION_ALREADY_ACTIVE",
+            detail="SESSION_ALREADY_ACTIVE: Ya existe una sesión activa para este usuario",
         )
 
-    # Get session timeout config
-    timeout_config_result = await db.execute(
+    # Get session timeout from config
+    result = await db.execute(
         select(ConfiguracionSistema).where(
             ConfiguracionSistema.clave == "session_timeout_minutes"
         )
     )
-    timeout_config = timeout_config_result.scalars().first()
-    timeout_minutes = get_session_timeout(timeout_config.valor if timeout_config else None)
+    config = result.scalar_one_or_none()
+    timeout_minutes = (
+        get_session_timeout_from_config(config.valor)
+        if config
+        else DEFAULT_SESSION_TIMEOUT_MINUTES
+    )
 
-    # Create JWT token
     expires_delta = timedelta(minutes=timeout_minutes)
+    now = datetime.utcnow()
+
     token = create_access_token(
-        data={"sub": str(user.id), "rol": user.rol},
+        data={"sub": str(user.id)},
         expires_delta=expires_delta,
     )
 
-    # Store session
+    # Create session record
     session = Sesion(
         usuario_id=user.id,
         token_jwt=token,
         activa=True,
-        fecha_creacion=datetime.utcnow(),
-        fecha_ultima_actividad=datetime.utcnow(),
-        fecha_expiracion=datetime.utcnow() + expires_delta,
+        fecha_creacion=now,
+        fecha_ultima_actividad=now,
+        fecha_expiracion=now + expires_delta,
     )
     db.add(session)
     await db.commit()
+    await db.refresh(session)
 
     return LoginResponse(
         token=token,
@@ -193,29 +212,25 @@ async def login(
     )
 
 
-# --- Logout ---
-
 @router.post("/auth/logout", tags=["Auth"])
 async def logout(
     current_user: Usuario = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    # Invalidate all active sessions for this user
+    # Invalidate current session
     result = await db.execute(
         select(Sesion).where(
             Sesion.usuario_id == current_user.id,
-            Sesion.activa == True,
+            Sesion.activa.is_(True),
         )
     )
     sessions = result.scalars().all()
     for session in sessions:
         session.activa = False
-    await db.commit()
 
+    await db.commit()
     return LogoutResponse(message="Sesión cerrada exitosamente")
 
-
-# --- Current User & Session ---
 
 @router.get("/auth/me", tags=["Auth"])
 async def get_current_user_endpoint(
@@ -229,41 +244,46 @@ async def refresh_session(
     current_user: Usuario = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    # Get session timeout config
-    timeout_config_result = await db.execute(
+    # Get session timeout from config
+    result = await db.execute(
         select(ConfiguracionSistema).where(
             ConfiguracionSistema.clave == "session_timeout_minutes"
         )
     )
-    timeout_config = timeout_config_result.scalars().first()
-    timeout_minutes = get_session_timeout(timeout_config.valor if timeout_config else None)
-
-    # Generate new token
-    expires_delta = timedelta(minutes=timeout_minutes)
-    token = create_access_token(
-        data={"sub": str(current_user.id), "rol": current_user.rol},
-        expires_delta=expires_delta,
+    config = result.scalar_one_or_none()
+    timeout_minutes = (
+        get_session_timeout_from_config(config.valor)
+        if config
+        else DEFAULT_SESSION_TIMEOUT_MINUTES
     )
 
-    # Deactivate old sessions
+    expires_delta = timedelta(minutes=timeout_minutes)
+    now = datetime.utcnow()
+
+    # Invalidate old sessions
     result = await db.execute(
         select(Sesion).where(
             Sesion.usuario_id == current_user.id,
-            Sesion.activa == True,
+            Sesion.activa.is_(True),
         )
     )
     old_sessions = result.scalars().all()
-    for session in old_sessions:
-        session.activa = False
+    for s in old_sessions:
+        s.activa = False
 
-    # Create new session
+    # Create new token and session
+    token = create_access_token(
+        data={"sub": str(current_user.id)},
+        expires_delta=expires_delta,
+    )
+
     new_session = Sesion(
         usuario_id=current_user.id,
         token_jwt=token,
         activa=True,
-        fecha_creacion=datetime.utcnow(),
-        fecha_ultima_actividad=datetime.utcnow(),
-        fecha_expiracion=datetime.utcnow() + expires_delta,
+        fecha_creacion=now,
+        fecha_ultima_actividad=now,
+        fecha_expiracion=now + expires_delta,
     )
     db.add(new_session)
     await db.commit()
@@ -276,80 +296,92 @@ async def refresh_session(
     )
 
 
-# --- Session Config (Admin) ---
+# ──────────────────────────────────────────────
+# Session Config endpoints (Admin)
+# ──────────────────────────────────────────────
 
-@router.get("/auth/session/config", tags=["Admin"])
+
+@router.get("/auth/session/config", tags=["Admin", "Session"])
 async def get_session_config(
+    admin_user: Usuario = Depends(get_admin_user),
     db: AsyncSession = Depends(get_db),
-    admin: Usuario = Depends(require_role("jefe_cocina", "gerente")),
 ):
     result = await db.execute(
         select(ConfiguracionSistema).where(
             ConfiguracionSistema.clave == "session_timeout_minutes"
         )
     )
-    config = result.scalars().first()
-    timeout = get_session_timeout(config.valor if config else None)
-    return SessionConfigResponse(timeout_minutes=timeout)
+    config = result.scalar_one_or_none()
+    timeout_minutes = (
+        get_session_timeout_from_config(config.valor)
+        if config
+        else DEFAULT_SESSION_TIMEOUT_MINUTES
+    )
+    return SessionConfigResponse(timeout_minutes=timeout_minutes)
 
 
-@router.patch("/auth/session/config", tags=["Admin"])
+@router.patch("/auth/session/config", tags=["Admin", "Session"])
 async def update_session_config(
     body: SessionConfigUpdate,
+    admin_user: Usuario = Depends(get_admin_user),
     db: AsyncSession = Depends(get_db),
-    admin: Usuario = Depends(require_role("jefe_cocina", "gerente")),
 ):
     result = await db.execute(
         select(ConfiguracionSistema).where(
             ConfiguracionSistema.clave == "session_timeout_minutes"
         )
     )
-    config = result.scalars().first()
-    if config is None:
+    config = result.scalar_one_or_none()
+    if config:
+        config.valor = str(body.timeout_minutes)
+    else:
         config = ConfiguracionSistema(
             clave="session_timeout_minutes",
             valor=str(body.timeout_minutes),
         )
         db.add(config)
-    else:
-        config.valor = str(body.timeout_minutes)
+
     await db.commit()
     return SessionConfigResponse(timeout_minutes=body.timeout_minutes)
 
 
-# --- Password Reset ---
+# ──────────────────────────────────────────────
+# Password Reset endpoints
+# ──────────────────────────────────────────────
 
-@router.post("/auth/recuperar", tags=["Auth"])
+
+@router.post("/auth/recuperar", tags=["Password Reset"])
 async def request_password_reset(
     body: PasswordResetRequest,
     db: AsyncSession = Depends(get_db),
 ):
-    # Always return success to prevent email enumeration
+    # Always return the same message for security (prevent email enumeration)
     result = await db.execute(
         select(Usuario).where(Usuario.email == body.email)
     )
-    user = result.scalars().first()
+    user = result.scalar_one_or_none()
 
     if user is not None and user.activo:
         # Invalidate any existing unused tokens for this user
-        old_tokens_result = await db.execute(
+        result = await db.execute(
             select(ResetToken).where(
                 ResetToken.usuario_id == user.id,
-                ResetToken.usado == False,
+                ResetToken.usado.is_(False),
             )
         )
-        old_tokens = old_tokens_result.scalars().all()
-        for old_token in old_tokens:
-            old_token.usado = True
+        old_tokens = result.scalars().all()
+        for t in old_tokens:
+            t.usado = True
 
-        # Generate new token
-        token_value = generate_reset_token()
+        # Create new reset token (15 min expiry)
+        now = datetime.utcnow()
+        token_str = generate_reset_token()
         reset_token = ResetToken(
             usuario_id=user.id,
-            token=token_value,
+            token=token_str,
             usado=False,
-            fecha_creacion=datetime.utcnow(),
-            fecha_expiracion=datetime.utcnow() + timedelta(minutes=RESET_TOKEN_EXPIRE_MINUTES),
+            fecha_creacion=now,
+            fecha_expiracion=now + timedelta(minutes=15),
         )
         db.add(reset_token)
         await db.commit()
@@ -359,74 +391,91 @@ async def request_password_reset(
     )
 
 
-@router.get("/auth/restablecer/{token}", tags=["Auth"])
+@router.get("/auth/restablecer/{token}", tags=["Password Reset"])
 async def verify_reset_token(
     token: str,
     db: AsyncSession = Depends(get_db),
 ):
     result = await db.execute(
-        select(ResetToken).options(selectinload(ResetToken.usuario)).where(
+        select(ResetToken).where(
             ResetToken.token == token,
-            ResetToken.usado == False,
+            ResetToken.usado.is_(False),
         )
     )
-    reset_token = result.scalars().first()
+    reset_token = result.scalar_one_or_none()
 
     if reset_token is None:
-        return ResetTokenStatus(valid=False)
+        return ResetTokenStatus(valid=False, email=None)
 
-    if reset_token.fecha_expiracion < datetime.utcnow():
-        return ResetTokenStatus(valid=False)
+    now = datetime.utcnow()
+    if now > reset_token.fecha_expiracion:
+        return ResetTokenStatus(valid=False, email=None)
 
-    return ResetTokenStatus(
-        valid=True,
-        email=reset_token.usuario.email,
+    # Get user email
+    user_result = await db.execute(
+        select(Usuario).where(Usuario.id == reset_token.usuario_id)
     )
+    user = user_result.scalar_one_or_none()
+    if user is None or not user.activo:
+        return ResetTokenStatus(valid=False, email=None)
+
+    return ResetTokenStatus(valid=True, email=user.email)
 
 
-@router.post("/auth/restablecer", tags=["Auth"])
-async def reset_password(
+@router.post("/auth/restablecer", tags=["Password Reset"])
+async def confirm_password_reset(
     body: PasswordResetConfirm,
     db: AsyncSession = Depends(get_db),
 ):
     result = await db.execute(
-        select(ResetToken).options(selectinload(ResetToken.usuario)).where(
+        select(ResetToken).where(
             ResetToken.token == body.token,
-            ResetToken.usado == False,
+            ResetToken.usado.is_(False),
         )
     )
-    reset_token = result.scalars().first()
+    reset_token = result.scalar_one_or_none()
 
     if reset_token is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="INVALID_OR_EXPIRED_TOKEN",
+            detail="INVALID_OR_EXPIRED_TOKEN: Token inválido o ya utilizado",
         )
 
-    if reset_token.fecha_expiracion < datetime.utcnow():
+    now = datetime.utcnow()
+    if now > reset_token.fecha_expiracion:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="INVALID_OR_EXPIRED_TOKEN",
+            detail="INVALID_OR_EXPIRED_TOKEN: El token ha expirado",
+        )
+
+    # Get user
+    user_result = await db.execute(
+        select(Usuario).where(Usuario.id == reset_token.usuario_id)
+    )
+    user = user_result.scalar_one_or_none()
+    if user is None or not user.activo:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="INVALID_OR_EXPIRED_TOKEN: Usuario no válido",
         )
 
     # Update password
-    user = reset_token.usuario
     user.password_hash = hash_password(body.password)
-    user.fecha_actualizacion = datetime.utcnow()
+    user.fecha_actualizacion = now
 
     # Invalidate token
     reset_token.usado = True
 
     # Invalidate all active sessions for this user
-    sessions_result = await db.execute(
+    session_result = await db.execute(
         select(Sesion).where(
             Sesion.usuario_id == user.id,
-            Sesion.activa == True,
+            Sesion.activa.is_(True),
         )
     )
-    active_sessions = sessions_result.scalars().all()
-    for session in active_sessions:
-        session.activa = False
+    active_sessions = session_result.scalars().all()
+    for s in active_sessions:
+        s.activa = False
 
     await db.commit()
 
@@ -435,35 +484,41 @@ async def reset_password(
     )
 
 
-# --- User CRUD (Admin) ---
+# ──────────────────────────────────────────────
+# User CRUD endpoints (Admin only)
+# ──────────────────────────────────────────────
 
-@router.get("/usuarios", tags=["Admin"])
+
+@router.get("/usuarios", tags=["Admin", "Users"])
 async def list_users(
     search: Optional[str] = Query(None),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
+    admin_user: Usuario = Depends(get_admin_user),
     db: AsyncSession = Depends(get_db),
-    admin: Usuario = Depends(require_role("jefe_cocina", "gerente")),
 ):
-    query = select(Usuario).where(Usuario.activo == True)
+    query = select(Usuario).where(Usuario.activo.is_(True))
 
     if search:
-        query = query.where(
-            Usuario.nombre.ilike(f"%{search}%") | Usuario.email.ilike(f"%{search}%")
+        search_filter = or_(
+            Usuario.nombre.ilike(f"%{search}%"),
+            Usuario.email.ilike(f"%{search}%"),
         )
+        query = query.where(search_filter)
 
-    # Total count
+    # Count total
     count_query = select(func.count()).select_from(query.subquery())
     total_result = await db.execute(count_query)
-    total = total_result.scalar()
+    total = total_result.scalar() or 0
 
-    # Pagination
+    # Paginate
     offset = (page - 1) * page_size
     query = query.order_by(Usuario.id).offset(offset).limit(page_size)
+
     result = await db.execute(query)
     users = result.scalars().all()
 
-    total_pages = (total + page_size - 1) // page_size
+    total_pages = max(1, (total + page_size - 1) // page_size)
 
     return PaginatedUsers(
         items=[UserOut.model_validate(u) for u in users],
@@ -474,90 +529,91 @@ async def list_users(
     )
 
 
-@router.get("/usuarios/{user_id}", tags=["Admin"])
+@router.get("/usuarios/{user_id}", tags=["Admin", "Users"])
 async def get_user(
     user_id: int,
+    admin_user: Usuario = Depends(get_admin_user),
     db: AsyncSession = Depends(get_db),
-    admin: Usuario = Depends(require_role("jefe_cocina", "gerente")),
 ):
     result = await db.execute(
         select(Usuario).where(Usuario.id == user_id)
     )
-    user = result.scalars().first()
+    user = result.scalar_one_or_none()
     if user is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="NOT_FOUND",
+            detail="NOT_FOUND: Usuario no encontrado",
         )
     return UserOut.model_validate(user)
 
 
-@router.post("/usuarios", tags=["Admin"])
+@router.post("/usuarios", tags=["Admin", "Users"])
 async def create_user(
     body: UserCreate,
+    admin_user: Usuario = Depends(get_admin_user),
     db: AsyncSession = Depends(get_db),
-    admin: Usuario = Depends(require_role("jefe_cocina", "gerente")),
 ):
-    # Check email uniqueness
-    existing_result = await db.execute(
+    # Validate email uniqueness
+    result = await db.execute(
         select(Usuario).where(Usuario.email == body.email)
     )
-    if existing_result.scalars().first() is not None:
+    if result.scalar_one_or_none():
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="EMAIL_EXISTS",
+            detail="EMAIL_EXISTS: El correo electrónico ya está registrado",
         )
 
-    # Validate station based on role
-    if body.rol in (Rol.JEFE_COCINA, Rol.GERENTE) and body.estacion != Estacion.TODAS:
+    # Validate role/station constraints
+    if body.rol.value in ("jefe_cocina", "gerente") and body.estacion.value != "Todas":
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="VALIDATION_ERROR",
+            detail="VALIDATION_ERROR: Los roles jefe_cocina y gerente deben tener estación 'Todas'",
         )
 
-    user = Usuario(
+    now = datetime.utcnow()
+    new_user = Usuario(
         nombre=body.nombre,
         email=body.email,
         password_hash=hash_password(body.password),
         rol=body.rol.value,
         estacion=body.estacion.value,
         activo=True,
-        fecha_creacion=datetime.utcnow(),
-        fecha_actualizacion=datetime.utcnow(),
+        fecha_creacion=now,
+        fecha_actualizacion=now,
     )
-    db.add(user)
+    db.add(new_user)
     await db.commit()
-    await db.refresh(user)
+    await db.refresh(new_user)
 
-    return UserOut.model_validate(user)
+    return UserOut.model_validate(new_user)
 
 
-@router.patch("/usuarios/{user_id}", tags=["Admin"])
+@router.patch("/usuarios/{user_id}", tags=["Admin", "Users"])
 async def update_user(
     user_id: int,
     body: UserUpdate,
+    admin_user: Usuario = Depends(get_admin_user),
     db: AsyncSession = Depends(get_db),
-    admin: Usuario = Depends(require_role("jefe_cocina", "gerente")),
 ):
     result = await db.execute(
         select(Usuario).where(Usuario.id == user_id)
     )
-    user = result.scalars().first()
+    user = result.scalar_one_or_none()
     if user is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="NOT_FOUND",
+            detail="NOT_FOUND: Usuario no encontrado",
         )
 
-    # Check email uniqueness if changing email
+    # Validate email uniqueness if changing
     if body.email is not None and body.email != user.email:
         email_result = await db.execute(
             select(Usuario).where(Usuario.email == body.email)
         )
-        if email_result.scalars().first() is not None:
+        if email_result.scalar_one_or_none():
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
-                detail="EMAIL_EXISTS",
+                detail="EMAIL_EXISTS: El correo electrónico ya está registrado",
             )
         user.email = body.email
 
@@ -573,6 +629,13 @@ async def update_user(
     if body.estacion is not None:
         user.estacion = body.estacion.value
 
+    # Validate role/station constraints after update
+    if user.rol in ("jefe_cocina", "gerente") and user.estacion != "Todas":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="VALIDATION_ERROR: Los roles jefe_cocina y gerente deben tener estación 'Todas'",
+        )
+
     user.fecha_actualizacion = datetime.utcnow()
     await db.commit()
     await db.refresh(user)
@@ -580,52 +643,40 @@ async def update_user(
     return UserOut.model_validate(user)
 
 
-@router.patch("/usuarios/{user_id}/deactivate", tags=["Admin"])
+@router.patch("/usuarios/{user_id}/deactivate", tags=["Admin", "Users"])
 async def deactivate_user(
     user_id: int,
+    admin_user: Usuario = Depends(get_admin_user),
     db: AsyncSession = Depends(get_db),
-    admin: Usuario = Depends(require_role("jefe_cocina", "gerente")),
 ):
-    if user_id == admin.id:
+    if user_id == admin_user.id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="CANNOT_DEACTIVATE_SELF",
+            detail="CANNOT_DEACTIVATE_SELF: No puedes desactivar tu propia cuenta",
         )
 
     result = await db.execute(
         select(Usuario).where(Usuario.id == user_id)
     )
-    user = result.scalars().first()
+    user = result.scalar_one_or_none()
     if user is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="NOT_FOUND",
+            detail="NOT_FOUND: Usuario no encontrado",
         )
 
     user.activo = False
     user.fecha_actualizacion = datetime.utcnow()
 
-    # Invalidate all active sessions
-    sessions_result = await db.execute(
+    # Invalidate all active sessions for this user
+    session_result = await db.execute(
         select(Sesion).where(
             Sesion.usuario_id == user.id,
-            Sesion.activa == True,
+            Sesion.activa.is_(True),
         )
     )
-    sessions = sessions_result.scalars().all()
-    for session in sessions:
-        session.activa = False
-
-    # Invalidate all pending reset tokens
-    tokens_result = await db.execute(
-        select(ResetToken).where(
-            ResetToken.usuario_id == user.id,
-            ResetToken.usado == False,
-        )
-    )
-    tokens = tokens_result.scalars().all()
-    for token in tokens:
-        token.usado = True
+    for s in session_result.scalars().all():
+        s.activa = False
 
     await db.commit()
 
@@ -635,20 +686,20 @@ async def deactivate_user(
     )
 
 
-@router.patch("/usuarios/{user_id}/reactivate", tags=["Admin"])
+@router.patch("/usuarios/{user_id}/reactivate", tags=["Admin", "Users"])
 async def reactivate_user(
     user_id: int,
+    admin_user: Usuario = Depends(get_admin_user),
     db: AsyncSession = Depends(get_db),
-    admin: Usuario = Depends(require_role("jefe_cocina", "gerente")),
 ):
     result = await db.execute(
         select(Usuario).where(Usuario.id == user_id)
     )
-    user = result.scalars().first()
+    user = result.scalar_one_or_none()
     if user is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="NOT_FOUND",
+            detail="NOT_FOUND: Usuario no encontrado",
         )
 
     user.activo = True

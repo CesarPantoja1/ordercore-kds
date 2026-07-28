@@ -1,44 +1,47 @@
-import { useState } from 'react';
+import React, { useState } from 'react';
 import { Link } from 'react-router-dom';
+import { ChefHat, Loader2, AlertCircle, Mail, ArrowLeft } from 'lucide-react';
 import { requestPasswordReset } from '../api/auth';
-import { Loader2, AlertCircle, CheckCircle, Mail } from 'lucide-react';
-import type { ApiError } from '../api/client';
+import { ApiError } from '../api/client';
 
 export default function PasswordResetRequestPage() {
   const [email, setEmail] = useState('');
-  const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
-  const [success, setSuccess] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [sent, setSent] = useState(false);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
 
     if (!email.trim()) {
-      setError('Por favor ingresa tu email.');
+      setError('Por favor ingresa tu email');
       return;
     }
 
     setLoading(true);
     try {
-      await requestPasswordReset({ email: email.trim().toLowerCase() });
-      setSuccess(true);
+      await requestPasswordReset({ email: email.trim() });
+      setSent(true);
     } catch (err) {
-      const apiErr = err as ApiError;
-      setError(apiErr.detail || 'Error al enviar la solicitud.');
+      if (err instanceof ApiError) {
+        setError(err.humanMessage || 'Error al procesar la solicitud');
+      } else {
+        setError('Error de conexión. Verifica el servidor.');
+      }
     } finally {
       setLoading(false);
     }
   };
 
-  if (success) {
+  if (sent) {
     return (
       <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
         <div className="bg-white rounded-2xl shadow-sm p-8 max-w-md w-full text-center">
-          <div className="text-green-500 mb-4 flex justify-center">
-            <CheckCircle className="w-16 h-16" />
+          <div className="mx-auto w-16 h-16 bg-green-100 rounded-full flex items-center justify-center mb-4">
+            <Mail className="w-8 h-8 text-green-600" />
           </div>
-          <h2 className="text-2xl font-bold text-slate-900 mb-2">
+          <h2 className="text-xl font-bold text-slate-800 mb-2">
             Solicitud enviada
           </h2>
           <p className="text-sm text-slate-500 mb-6">
@@ -46,8 +49,9 @@ export default function PasswordResetRequestPage() {
           </p>
           <Link
             to="/login"
-            className="inline-block px-6 py-2 bg-blue-600 text-white rounded-xl hover:bg-blue-700 transition-all text-sm"
+            className="inline-flex items-center gap-2 text-sm text-blue-600 hover:text-blue-800 transition-all"
           >
+            <ArrowLeft className="w-4 h-4" />
             Volver al inicio de sesión
           </Link>
         </div>
@@ -59,23 +63,25 @@ export default function PasswordResetRequestPage() {
     <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
       <div className="bg-white rounded-2xl shadow-sm p-8 max-w-md w-full">
         <div className="text-center mb-8">
-          <div className="w-12 h-12 bg-blue-600 rounded-2xl flex items-center justify-center mx-auto mb-4">
-            <span className="text-white font-bold text-lg">OC</span>
+          <div className="mx-auto w-14 h-14 bg-blue-600 rounded-2xl flex items-center justify-center mb-4">
+            <ChefHat className="w-7 h-7 text-white" />
           </div>
-          <h1 className="text-2xl font-bold text-slate-900">
+          <h1 className="text-2xl font-bold text-slate-900">OrderCore KDS</h1>
+          <p className="text-sm text-slate-500 mt-1">
             Recuperar contraseña
-          </h1>
-          <p className="text-sm text-slate-500 mt-2">
-            Ingresa tu email para recibir instrucciones
           </p>
         </div>
 
         {error && (
-          <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-xl flex items-start gap-3">
-            <AlertCircle className="w-5 h-5 text-red-500 mt-0.5 shrink-0" />
-            <p className="text-sm text-red-700">{error}</p>
+          <div className="mb-6 p-3 bg-red-50 border border-red-200 rounded-xl flex items-start gap-2 text-sm text-red-700">
+            <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
+            <span>{error}</span>
           </div>
         )}
+
+        <p className="text-sm text-slate-600 mb-6">
+          Ingresa tu email y te enviaremos un enlace para restablecer tu contraseña.
+        </p>
 
         <form onSubmit={handleSubmit} className="space-y-5">
           <div>
@@ -87,33 +93,34 @@ export default function PasswordResetRequestPage() {
               type="email"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
-              className="w-full px-4 py-3 rounded-xl border border-slate-300 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none text-slate-900 bg-white transition-all"
+              className="w-full px-4 py-3 rounded-2xl border border-slate-200 text-slate-900 text-base placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all"
               placeholder="tu@email.com"
               disabled={loading}
-              autoComplete="off"
-              required
             />
           </div>
 
           <button
             type="submit"
             disabled={loading}
-            className="w-full py-3 bg-blue-600 text-white font-medium rounded-xl hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all flex items-center justify-center gap-2"
+            className="w-full py-3 bg-blue-600 text-white font-medium rounded-2xl shadow-sm hover:bg-blue-700 disabled:opacity-60 disabled:cursor-not-allowed transition-all flex items-center justify-center gap-2"
           >
             {loading ? (
-              <Loader2 className="w-5 h-5 animate-spin" />
+              <>
+                <Loader2 className="w-5 h-5 animate-spin" />
+                Enviando...
+              </>
             ) : (
-              <Mail className="w-5 h-5" />
+              'Enviar enlace de recuperación'
             )}
-            {loading ? 'Enviando...' : 'Enviar instrucciones'}
           </button>
         </form>
 
         <div className="mt-6 text-center">
           <Link
             to="/login"
-            className="text-sm text-blue-600 hover:text-blue-700 underline"
+            className="inline-flex items-center gap-2 text-sm text-slate-500 hover:text-slate-700 transition-all"
           >
+            <ArrowLeft className="w-4 h-4" />
             Volver al inicio de sesión
           </Link>
         </div>
