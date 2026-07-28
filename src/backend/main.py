@@ -3,9 +3,10 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from database import Base, engine
 
-from autenticacion_y_gestion_de_usuarios.routes import router
+from autenticacion_y_gestion_de_usuarios.routes import router as auth_router
+from gestion_de_comandas_ordenes_e_items.routes import router as comandas_router
 
-app = FastAPI(title="OrderCore KDS - Autenticación y Gestión de Usuarios")
+app = FastAPI(title="OrderCore KDS")
 
 app.add_middleware(
     CORSMiddleware,
@@ -15,7 +16,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(router, prefix="/api/autenticacion_y_gestion_de_usuarios")
+app.include_router(auth_router, prefix="/api/autenticacion_y_gestion_de_usuarios")
+app.include_router(comandas_router, prefix="/api/gestion_de_comandas_ordenes_e_items")
 
 
 @app.on_event("startup")

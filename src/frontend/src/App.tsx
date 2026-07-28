@@ -13,6 +13,12 @@ import DashboardPage from './pages/DashboardPage';
 import UserListPage from './pages/UserListPage';
 import UserCreatePage from './pages/UserCreatePage';
 import UserEditPage from './pages/UserEditPage';
+import ComandasPage from './pages/ComandasPage';
+import ComandaCreatePage from './pages/ComandaCreatePage';
+import ComandaDetailPage from './pages/ComandaDetailPage';
+import ComandaEditPage from './pages/ComandaEditPage';
+import ComandaCancelPage from './pages/ComandaCancelPage';
+import AuditoriaPage from './pages/AuditoriaPage';
 import NotFoundPage from './pages/NotFoundPage';
 
 function RootRedirect() {
@@ -110,6 +116,68 @@ function AppRoutes() {
           <ProtectedRoute allowedRoles={['jefe_cocina', 'gerente']}>
             <Layout>
               <UserEditPage />
+            </Layout>
+          </ProtectedRoute>
+        }
+      />
+
+      {/* Comandas routes */}
+      <Route
+        path="/comandas"
+        element={
+          <ProtectedRoute allowedRoles={['jefe_cocina', 'cocinero', 'gerente']}>
+            <Layout>
+              <ComandasPage />
+            </Layout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/comandas/crear"
+        element={
+          <ProtectedRoute allowedRoles={['jefe_cocina', 'mesero']}>
+            <Layout>
+              <ComandaCreatePage />
+            </Layout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/comandas/:id"
+        element={
+          <ProtectedRoute allowedRoles={['jefe_cocina', 'cocinero', 'gerente']}>
+            <Layout>
+              <ComandaDetailPage />
+            </Layout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/comandas/:id/editar"
+        element={
+          <ProtectedRoute allowedRoles={['jefe_cocina', 'mesero']}>
+            <Layout>
+              <ComandaEditPage />
+            </Layout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/comandas/:id/cancelar"
+        element={
+          <ProtectedRoute allowedRoles={['jefe_cocina', 'gerente']}>
+            <Layout>
+              <ComandaCancelPage />
+            </Layout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/auditoria"
+        element={
+          <ProtectedRoute allowedRoles={['gerente']}>
+            <Layout>
+              <AuditoriaPage />
             </Layout>
           </ProtectedRoute>
         }

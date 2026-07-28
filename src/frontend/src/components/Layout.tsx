@@ -1,5 +1,5 @@
 import { Link, useLocation } from 'react-router-dom';
-import { Users, LayoutDashboard, ChefHat } from 'lucide-react';
+import { Users, LayoutDashboard, ChefHat, ClipboardList, Clock } from 'lucide-react';
 import type { ReactNode } from 'react';
 import { useAuth } from '../context/AuthContext';
 import LogoutButton from './LogoutButton';
@@ -14,10 +14,14 @@ export default function Layout({ children }: LayoutProps) {
   const location = useLocation();
 
   const isAdmin = user?.rol === 'jefe_cocina' || user?.rol === 'gerente';
+  const esCocinero = user?.rol === 'cocinero' || isAdmin;
+  const esGerente = user?.rol === 'gerente';
 
   const navItems = [
     { path: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
+    ...(esCocinero ? [{ path: '/comandas', label: 'Comandas', icon: ClipboardList }] : []),
     ...(isAdmin ? [{ path: '/usuarios', label: 'Usuarios', icon: Users }] : []),
+    ...(esGerente ? [{ path: '/auditoria', label: 'Auditoría', icon: Clock }] : []),
   ];
 
   return (

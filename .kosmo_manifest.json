@@ -1,0 +1,43 @@
+{
+  "project": "OrderCore KDS",
+  "generated_at": "2026-07-28T01:18:43.092072",
+  "specs": [
+    {
+      "spec_id": "dc2239cf-bb59-478d-88f4-eed817b01cae",
+      "spec_folder": "autenticacion_y_gestion_de_usuarios",
+      "prefix": "/api/autenticacion_y_gestion_de_usuarios",
+      "endpoints": [
+        "GET /auth/setup/status",
+        "POST /auth/setup/complete",
+        "POST /auth/login",
+        "POST /auth/logout",
+        "GET /auth/me",
+        "POST /auth/session/refresh",
+        "GET /auth/session/config",
+        "PATCH /auth/session/config",
+        "POST /auth/recuperar",
+        "GET /auth/restablecer/{token}",
+        "POST /auth/restablecer",
+        "GET /usuarios",
+        "GET /usuarios/{id}",
+        "POST /usuarios",
+        "PATCH /usuarios/{id}",
+        "PATCH /usuarios/{id}/deactivate",
+        "PATCH /usuarios/{id}/reactivate"
+      ],
+      "entities": [],
+      "pages": [
+        "/",
+        "/setup-wizard",
+        "/login",
+        "/recuperar-contrasena",
+        "/restablecer-contrasena",
+        "/dashboard",
+        "/usuarios",
+        "/usuarios/nuevo",
+        "/usuarios/:id/editar"
+      ],
+      "generated_at": "2026-07-28T01:18:43.092072"
+    }
+  ]
+}
